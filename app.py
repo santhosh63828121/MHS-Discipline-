@@ -5,15 +5,19 @@ from datetime import datetime
 import pandas as pd
 from flask import send_file
 import io
+from werkzeug.utils import secure_filename
+import os
 
 app = Flask(__name__)
 CORS(app)
 app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///students.db'
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
+app.config['UPLOAD_FOLDER'] = 'uploads'
 db = SQLAlchemy(app)
 
 # Enable CORS for all routes with a specific origin (adjust accordingly)
-
+if not os.path.exists(app.config['UPLOAD_FOLDER']):
+    os.makedirs(app.config['UPLOAD_FOLDER'])
 
 
 # Create a model for the student with additional fields
@@ -103,6 +107,55 @@ def add_student():
             'Date Added': new_student.date_added
         }
     }), 201
+
+
+# Upload route
+@app.route('/upload_excel', methods=['POST'])
+def upload_excel():
+    try:
+        if 'file' not in request.files:
+            return jsonify({'message': 'No file part in the request'}), 400
+
+        file = request.files['file']
+        if file.filename == '':
+            return jsonify({'message': 'No selected file'}), 400
+
+        filepath = os.path.join(app.config['UPLOAD_FOLDER'], file.filename)
+        os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
+        file.save(filepath)
+
+        # Read Excel using pandas
+        df = pd.read_excel(filepath)
+
+        # Expected columns
+        expected_columns = {'qr_code', 'name', 'student_class', 'disrespect_count', 'date_added'}
+        if not expected_columns.issubset(df.columns):
+            return jsonify({'message': f'Missing columns in Excel. Required: {expected_columns}'}), 400
+
+        added = 0
+        for _, row in df.iterrows():
+            # Avoid duplicate QR codes
+            if Student.query.filter_by(qr_code=row['qr_code']).first():
+                continue
+
+            student = Student(
+                qr_code=row['qr_code'],
+                name=row['name'],
+                student_class=row['student_class'],
+                disrespect_count=int(row.get('disrespect_count', 0)),
+                date_added=str(row['date_added']) if not pd.isna(row['date_added']) else datetime.now().strftime("%Y-%m-%d")
+            )
+            db.session.add(student)
+            added += 1
+
+        db.session.commit()
+        return jsonify({'message': f'{added} students added successfully.'}), 200
+
+    except Exception as e:
+        db.session.rollback()
+        print("Server error:", e)
+        return jsonify({'message': 'Server error', 'error': str(e)}), 500
+    
 
 # Route to view all students
 @app.route('/view_students', methods=['GET'])
